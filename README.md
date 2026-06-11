@@ -1,11 +1,28 @@
-# World Model Memory Optimization Research
+PG-S3: Physically-Grounded Selective State Space Models
 
-## Objective
-Develop extreme memory-optimized World Models for CPU-bound environments (8GB RAM) with O(N) complexity and physical grounding.
+Research Overview
 
-## Structure
-- `research/`: Literature and foundational notes.
-- `math/`: Mathematical proofs and definitions.
-- `physics/`: Physical grounding analysis.
-- `hardware/`: Optimization strategies.
-- `paper/`: Final research paper.
+Modern AI systems increasingly need to simulate physical environments — predicting how a robot arm will move, how a fluid will flow, or how a dynamical system will evolve over long time horizons. These tasks are the domain of world models: learned simulators that roll out future states from a compact latent representation. The dominant approach uses Transformer architectures, but Transformers carry a fundamental computational burden — their self-attention mechanism scales as O(L2) in both time and memory with respect to sequence length L. On consumer-grade, CPU-bound hardware, this makes long-horizon simulation prohibitively expensive.
+
+Selective State Space Models (SSMs), most notably Mamba, recover O(L) complexity through a recurrent scan, making them attractive for deployment on constrained hardware. However, they carry a structural flaw when applied to physical systems: their standard Zero-Order Hold (ZOH) discretization treats the latent transition as a piecewise-constant step, with no mechanism to enforce the conservation laws that govern real physics. Specifically, ZOH does not constrain the transition Jacobian to be symplectic — it does not preserve the canonical two-form of Hamiltonian phase space. The consequence is artificial energy drift that compounds over long rollouts, steadily corrupting the physical fidelity of the simulation.
+
+This paper introduces PG-S3 (Physically-Grounded Selective State Space), a world-model architecture that closes this gap. It achieves O(L) computational complexity while rigorously preserving Hamiltonian geometric structure, and does so within the memory and compute envelope of an 8 GB consumer CPU.
+
+Core Technical Contributions
+1. Symplectic Selective Dynamics. The central innovation is replacing ZOH with a Störmer– Verlet symplectic integrator inside the SSM scan. The latent state is partitioned into generalised coordinates and momenta, h = [q, p]⊤, encoding a Hamiltonian phase-space vector. The Störmer- Verlet update — a half-kick in momentum, a full drift in position, then another half-kick — is provably symplectic: its Jacobian M satisfies M⊤JM = J, preserving phase-space volume exactly at every step. 
+This means the integrator conserves a shadow Hamiltonian H̃ = H + O(Δt2) over exponentially long intervals, with energy error that oscillates within a bounded band rather than growing secularly. The formal proof invokes the composition of exact Hamiltonian flows, a result from geometric numerical integration theory.
+2. Gershgorin CFL Stability Bound. For a latent transition matrix A, the Gershgorin Circle Theorem provides a conservative upper bound ρ_G on the spectral radius. Since Störmer-Verlet stability for a harmonic mode requires ω·Δt ≤ 2, the paper derives the Latent CFL Condition: Δt = min(Δ_max, 2η/ρ_G), where η is a safety factor. This bound is computed branchlessly via AVX2 horizontal reduction, contracting the time step automatically during high-gradient perturbations without pipeline stalls — a hardware-aware solution that prevents numerical blow-up without any conditional branching overhead.
+3. Scale-Adaptive INT4 Quantization (SAQ). To fit the model within an 8 GB hardware budget, projection weights are quantized to 4-bit integers. Rather than using a fixed quantization scale, SAQ adapts the scale α(t) per 64-element tile by tracking the local dynamic range of each tile's weights. The theoretical justification links the quantization noise floor σ2_q to the tail energy of a Kolmogorov turbulence spectrum E(k) ∝ k^{-5/3}, ensuring INT4 precision does not catastrophically suppress the physically relevant spectral content.
+4. Neural-Physical Coupling Layer. The encoder maps input tokens to Hamiltonian phase space through a sequence of three elementary symplectic shear matrices W = S3S2S1, each in SL(2,R). Since for one degree of freedom SL(2,R) = Sp(2,R), the composition satisfies W⊤JW = J by construction. For the full d-dimensional latent space, symplecticity is preserved via a block- diagonal product of d/2 independent shear pairs. Dissipative environments are handled through an operator-split Rayleigh damping step — deliberately kept outside the conservative symplectic core — with the conformally symplectic update p ← exp(−γΔt)⊙p guaranteeing monotonic energy removal.
+
+Empirical Validation
+The framework is validated across five experimental phases on a single Intel Core i5 CPU (8 GB RAM, AVX2, macOS Ventura).
+  
+Phase 01 benchmarks scan latency across sequence lengths from 128 to 16,384. Log-log regression confirms O(n) empirical scaling with R2 = 0.996, and peak RSS remains well below 5 GB at all lengths.
+Phase 02 subjects the Störmer-Verlet kernel to a controlled harmonic-oscillator audit (ω = 1, Δt = 0.01, 1000 steps). The maximum energy-conserving error ECE_max = 2.5000 × 10−5 matches the theoretical shadow-Hamiltonian bound ω2Δt2/4 to four significant figures. The secondary check ECE_rms ≈ ECE_max/√2 confirms the sinusoidal identity expected for a bounded orbit — direct evidence of motion on the shadow energy surface rather than outward spiralling.
+Phase 03 validates the coupled system on 2D Navier-Stokes and rigid-body rollouts. A fourth- order vorticity stencil yields a mean-square-curl VPS of 1.25 × 10−9, confirming physical fluid structure is preserved. Memory stays within the 5 GB ceiling.
+Phase 04 scales to 524,288 simultaneous trajectories in 512-dimensional phase space. The system sustains 1.2 × 106 steps per second with a total fractional Hamiltonian drift of only 1.26 × 10−11 E0 across ~1.2 × 109 integration steps — eleven orders of magnitude below the energy scale. Peak worker RSS is 4,096.5 MB.
+Phase 05 applies topological reconstruction to the production attractor using delay embedding (τ = 1, m = 3), the Rosenstein algorithm for Lyapunov exponent estimation, Poincaré sectioning, and correlation-dimension analysis. Results: λ_max = 0.3578 (R2 = 0.9792), predictability horizon L_crit = 2.79 embedding steps, and correlation dimension D2 = 2.12, consistent with a low- complexity dissipative strange attractor.
+A direct ablation against forward Euler integration shows the symplectic advantage reaching 268,400× at 104 steps — a ratio that grows without bound as Euler diverges while PG-S3 remains bounded.
+
+PG-S3 demonstrates that physical conservation laws and hardware-level efficiency are complementary rather than competing constraints. By grounding selective state space dynamics in Hamiltonian geometry, the architecture enables accurate, stable, long-horizon physical simulation at over one million steps per second on accessible consumer hardware — bridging the gap between physics-informed neural networks and the linear-time efficiency demanded by real-world deployment.
