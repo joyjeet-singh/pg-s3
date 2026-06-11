@@ -1,0 +1,234 @@
+{
+  "project_reference": {
+    "project_md_updated": "2026-06-07",
+    "core_research_question": "How can we achieve O(L) complexity execution via branchless SIMD on CPU & SAQ INT4 Memory Architecture Grounding?",
+    "current_focus": "Phase 05: Statistical Analysis & Phase-Space Reconstruction"
+  },
+  "project_contract": {
+    "schema_version": 1,
+    "scope": {
+      "question": "How can we achieve O(L) complexity execution via branchless SIMD on CPU & SAQ INT4 Memory Architecture Grounding?",
+      "in_scope": [
+        "Complexity and hardware analysis"
+      ],
+      "out_of_scope": [],
+      "unresolved_questions": []
+    },
+    "context_intake": {
+      "must_read_refs": [],
+      "must_include_prior_outputs": [
+        "GPD/STATE.md"
+      ],
+      "user_asserted_anchors": [
+        "target-memory-8GB"
+      ],
+      "known_good_baselines": [
+        "DreamerV3"
+      ],
+      "context_gaps": [],
+      "crucial_inputs": [
+        "GPD/ROADMAP.md"
+      ]
+    },
+    "approach_policy": {
+      "formulations": [],
+      "allowed_estimator_families": [],
+      "forbidden_estimator_families": [],
+      "allowed_fit_families": [],
+      "forbidden_fit_families": [],
+      "stop_and_rethink_conditions": []
+    },
+    "observables": [],
+    "claims": [
+      {
+        "id": "c_01",
+        "statement": "Model achieves true O(L) execution via AVX2/AVX-512 register saturation without exceeding 8GB system RAM constraints.",
+        "claim_kind": "claim",
+        "observables": [],
+        "deliverables": [
+          "01-SUMMARY.md",
+          "kernel_spec.md",
+          "memory_allocation_map.md"
+        ],
+        "acceptance_tests": [
+          "t_memory",
+          "t_cache",
+          "t_openvino",
+          "t_proof"
+        ],
+        "references": [],
+        "parameters": [
+          {
+            "symbol": "L",
+            "domain_or_type": "integer",
+            "aliases": [],
+            "required_in_proof": true,
+            "notes": null
+          }
+        ],
+        "hypotheses": [
+          {
+            "id": "h_01",
+            "text": "Branchless SIMD saturation",
+            "symbols": [],
+            "category": "assumption",
+            "required_in_proof": true
+          }
+        ],
+        "quantifiers": [],
+        "conclusion_clauses": [
+          {
+            "id": "cc_01",
+            "text": "Scales as O(L)"
+          }
+        ],
+        "proof_deliverables": [
+          "01-SUMMARY.md",
+          "kernel_spec.md"
+        ]
+      }
+    ],
+    "deliverables": [
+      {
+        "id": "01-SUMMARY.md",
+        "kind": "report",
+        "path": null,
+        "description": "Phase 01 Complexity Analysis Summary",
+        "must_contain": []
+      },
+      {
+        "id": "kernel_spec.md",
+        "kind": "code",
+        "path": null,
+        "description": "C++ SIMD Kernel Blueprint",
+        "must_contain": []
+      },
+      {
+        "id": "memory_allocation_map.md",
+        "kind": "dataset",
+        "path": null,
+        "description": "OpenVINO-compatible Memory Allocation Map",
+        "must_contain": []
+      }
+    ],
+    "acceptance_tests": [
+      {
+        "id": "t_memory",
+        "subject": "c_01",
+        "kind": "benchmark",
+        "procedure": "Measure peak RSS memory allocation during inference.",
+        "pass_condition": "Peak memory allocation < 5GB",
+        "evidence_required": [],
+        "automation": "automated"
+      },
+      {
+        "id": "t_cache",
+        "subject": "c_01",
+        "kind": "consistency",
+        "procedure": "Monitor L3 cache misses during inference scans.",
+        "pass_condition": "Zero L3 cache spilling",
+        "evidence_required": [],
+        "automation": "automated"
+      },
+      {
+        "id": "t_openvino",
+        "subject": "c_01",
+        "kind": "cross_method",
+        "procedure": "Validate OpenVINO model compatibility.",
+        "pass_condition": "Valid OpenVINO integration pathway",
+        "evidence_required": [],
+        "automation": "hybrid"
+      },
+      {
+        "id": "t_proof",
+        "subject": "c_01",
+        "kind": "proof_hypothesis_coverage",
+        "procedure": "Check hypothesis coverage",
+        "pass_condition": "h_01 covered",
+        "evidence_required": [],
+        "automation": "human"
+      }
+    ],
+    "references": [],
+    "forbidden_proxies": [],
+    "links": [],
+    "uncertainty_markers": {
+      "weakest_anchors": [
+        "INT4-quantization"
+      ],
+      "unvalidated_assumptions": [],
+      "competing_explanations": [],
+      "disconfirming_observations": [
+        "non-linear-scaling"
+      ]
+    }
+  },
+  "position": {
+    "current_phase": "05",
+    "current_phase_name": "Production Execution, Chaos Injection, and Long-Term Stability Profiling",
+    "total_phases": 5,
+    "current_plan": "0",
+    "total_plans_in_phase": 3,
+    "status": "Planning",
+    "last_activity": "2026-06-08",
+    "last_activity_desc": null,
+    "progress_percent": 80,
+    "paused_at": null
+  },
+  "active_calculations": [],
+  "intermediate_results": [],
+  "open_questions": [],
+  "resolved_questions": [],
+  "performance_metrics": {
+    "rows": []
+  },
+  "decisions": [],
+  "approximations": [],
+  "convention_lock": {
+    "metric_signature": "diag(-1,1,1,1)",
+    "fourier_convention": "physics (exp(-iwt))",
+    "natural_units": "hbar=c=1",
+    "gauge_choice": "Lorenz",
+    "regularization_scheme": "dimensional",
+    "renormalization_scheme": "MS-bar",
+    "coordinate_system": "Cartesian",
+    "spin_basis": "Standard",
+    "state_normalization": "relativistic",
+    "coupling_convention": "Standard",
+    "index_positioning": "Standard",
+    "time_ordering": "Standard",
+    "commutation_convention": "Standard",
+    "levi_civita_sign": "epsilon0123=1",
+    "generator_normalization": "Standard",
+    "covariant_derivative_sign": "Standard",
+    "gamma_matrix_convention": "Standard",
+    "creation_annihilation_order": "Standard",
+    "custom_conventions": {}
+  },
+  "propagated_uncertainties": [],
+  "pending_todos": [],
+  "blockers": [],
+  "continuation": {
+    "schema_version": 1,
+    "handoff": {
+      "resume_file": null,
+      "stopped_at": null,
+      "last_result_id": null,
+      "recorded_at": null,
+      "recorded_by": null
+    },
+    "bounded_segment": null,
+    "machine": {
+      "recorded_at": null,
+      "hostname": null,
+      "platform": null
+    }
+  },
+  "contract_alignment": {
+    "confirmed_at": "2026-06-07T07:29:45.575398+00:00",
+    "confirmed_contract_hash": "sha256:a117c795ec3683008d1b89332d8257feb2d0b3baa253864309025d6cfa007780",
+    "confirmed_context_hash": "sha256:40915bc2e4adb499707025cb8d19115b3af5e2b0045e109111a7b5d3b3ab3c81"
+  },
+  "_version": 1,
+  "_synced_at": "2026-06-08T06:59:04.751216+00:00"
+}

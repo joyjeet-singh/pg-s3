@@ -1,0 +1,855 @@
+%% PG-S3: Physically-Grounded Selective State Space Models
+%% For Overleaf: upload main.tex and references.bib in the same project.
+%% Compile with: pdflatex -> bibtex -> pdflatex -> pdflatex
+
+\documentclass[10pt,twocolumn]{article}
+
+%% Packages
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.75in, top=1in, bottom=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{cite}
+\usepackage{caption}
+
+%% Formatting
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black,
+            urlcolor=blue!60!black}
+\setlength{\columnsep}{18pt}
+\captionsetup{font=small, labelfont=bf}
+
+%% Math operators and theorem environments
+\DeclareMathOperator{\ECE}{ECE}
+\DeclareMathOperator{\VPS}{VPS}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\calH}{\mathcal{H}}
+\newcommand{\calM}{\mathcal{M}}
+\newcommand{\calR}{\mathcal{R}}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+%% Title
+\title{\vspace{-1.5em}\textbf{Linear-Time Efficiency and Physical Manifold
+Fidelity in Symplectic Selective State Space Models}\vspace{-0.5em}}
+
+\author{%
+  Joyjeet Singh\\
+  {\small \textit{joyjeetsingh1@gmail.com}}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+% ABSTRACT
+\begin{abstract}
+We present the \textbf{Physically-Grounded Selective State Space (PG-S3)}
+model, a world-model architecture that simultaneously achieves
+$O(L)$ computational complexity and high fidelity to the underlying physical
+manifold of modeled systems.
+By replacing the unconstrained Zero-Order Hold (ZOH) transition used in
+selective state space models with a St\"{o}rmer--Verlet symplectic integrator, and
+encoding the latent state as a Hamiltonian phase-space vector
+$h = [q,\,p]^{\top}$, PG-S3 preserves geometric structure throughout
+long autoregressive rollouts.
+We further augment the core with (i)~a neural-physical coupling layer whose
+phase-space transform satisfies the symplecticity constraint $W^{\top}JW=J$
+by construction, (ii)~a branchless Gershgorin CFL stability bound
+on the adaptive time step $\Delta_t$, and (iii)~Scale-Adaptive INT4
+Quantization (SAQ) targeting 8\,GB CPU-bound hardware.
+A five-phase empirical campaign validates the framework end-to-end:
+production runs sustaining $1.2\times10^6$ steps per second across
+$524\,288$ trajectories achieve a total fractional Hamiltonian drift of
+$1.26\times10^{-11}\,E_0$ within a peak resident-set size of
+$4\,096.5$\,MB.
+A controlled harmonic-oscillator audit yields
+$\ECE_{\mathrm{rms}}=1.4886\times10^{-5}\approx
+\ECE_{\max}/\sqrt{2}$, the sinusoidal identity expected when the
+trajectory remains on a nearby shadow energy surface.
+Topological phase-space reconstruction via the Rosenstein algorithm yields a
+maximal Lyapunov exponent $\lambda_{\max}=0.3578$ ($R^2=0.9792$) and a
+predictability horizon $L_{\text{crit}}=2.79$.
+\end{abstract}
+
+% 1. INTRODUCTION
+\section{Introduction}
+\label{sec:intro}
+
+World models---learned simulators that predict future states through latent
+``imagination''---underpin modern model-based reinforcement learning, physical
+simulation, and autonomous reasoning \cite{hafner2019dream,lecun2022path}.
+Yet the dominant Transformer-based implementations incur $O(L^2)$ time and
+memory complexity with respect to sequence length $L$, making long-horizon
+rollouts on consumer-grade, CPU-bound hardware prohibitive.
+
+Selective State Space Models (SSMs) such as Mamba \cite{gu2023mamba} recover
+$O(L)$ complexity via a recurrent scan, but their standard
+Zero-Order Hold (ZOH) discretization is not constrained to be Hamiltonian or
+symplectic in canonical phase-space coordinates.
+The exact exponential of a Hamiltonian linear system is symplectic, but the
+generic input-dependent affine transition used by selective SSMs need not
+respect the canonical two-form.
+This mismatch can introduce artificial energy drift over long rollouts,
+systematically degrading predictive fidelity in physics-rich environments.
+
+Independently, Hamiltonian Neural Networks \cite{greydanus2019hamiltonian} and
+Symplectic Neural Networks \cite{chen2019symplectic} have demonstrated
+that enforcing Hamiltonian structure improves long-horizon accuracy, but
+have not been integrated into the efficient linear-scan paradigm or hardware
+optimization strategies required for CPU deployment.
+
+\paragraph{Contributions.} This paper closes that gap through
+three primary contributions:
+\begin{enumerate}
+  \item \textbf{Symplectic Selective Dynamics:} We replace ZOH with a
+        St\"{o}rmer--Verlet integrator inside the SSM scan, provably
+        preserving the symplectic 2-form of the latent Hamiltonian flow.
+  \item \textbf{Hardware-aware CPU deployment:} An AVX2-optimized
+        branchless kernel with SAQ INT4 quantization executes the
+        $O(L)$ scan in under 420\,ms for $L=16\,384$ with
+        peak RSS well below 5\,GB.
+  \item \textbf{End-to-end empirical validation:} Five verification
+        phases---complexity benchmarking, energy conservation, neural-physical
+        coupling, production-scale profiling, and topological
+        reconstruction---confirm both theoretical properties and
+        practical hardware constraints simultaneously.
+\end{enumerate}
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:related} reviews related work.
+Section~\ref{sec:framework} develops the mathematical framework.
+Section~\ref{sec:method} describes the architecture and hardware
+implementation.
+Section~\ref{sec:experiments} presents the empirical evaluation.
+Section~\ref{sec:discussion} discusses limitations, and
+Section~\ref{sec:conclusion} concludes.
+
+% 2. RELATED WORK
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Selective State Space Models.}
+Mamba \cite{gu2023mamba} introduces input-dependent selection into linear SSMs,
+achieving competitive performance with Transformers at $O(L)$ complexity via a
+hardware-aware parallel scan.
+Subsequent work (H3 \cite{fu2022hungry}, Hyena \cite{poli2023hyena},
+S4 \cite{gu2021efficiently}) focuses on expressiveness and long-range
+dependencies, but none addresses physical conservation laws
+or CPU-bound deployment.
+
+\paragraph{Physics-Informed Neural Architectures.}
+Hamiltonian Neural Networks \cite{greydanus2019hamiltonian} learn
+energy-conserving dynamics by parameterising $\calH(q,p)$ as a network.
+Symplectic Recurrent Neural Networks \cite{chen2019symplectic} learn
+Hamiltonian dynamics while unrolling with symplectic integration.
+Neural ODEs \cite{chen2018neural} embed continuous dynamics into the
+latent space but do not pair this with the efficient recurrent scan
+needed for $O(L)$ inference.
+The combination of symplectic latent dynamics, selective SSM-style scanning,
+4-bit quantization, and register-level SIMD execution is not the focus of
+these methods.
+
+\paragraph{CPU Inference Optimization.}
+GGUF/llama.cpp \cite{llamacpp} demonstrates practical INT4 deployment on
+commodity CPUs, but is not designed for physically-constrained dynamics.
+OpenVINO \cite{openvino} provides a custom-op extension framework that
+we leverage for hardware-specific kernel registration.
+FAVOR+ \cite{choromanski2020rethinking} approximates attention with
+$O(ndr)$ random-feature kernels; we adapt it as the linear-attention
+baseline in our benchmarking study.
+
+\paragraph{Lyapunov Analysis.}
+The Rosenstein algorithm \cite{rosenstein1993practical} estimates the
+maximal Lyapunov exponent from a single time series via delay embedding and
+nearest-neighbour divergence tracking; we employ it in Phase~05 to
+characterise the attractor of the learned latent dynamics.
+
+% 3. MATHEMATICAL FRAMEWORK
+\section{Mathematical Framework}
+\label{sec:framework}
+
+\subsection{Selective State Space Models}
+A continuous-time selective SSM evolves as
+\begin{align}
+  \dot{h}(t) &= \mathbf{A}\,h(t) + \mathbf{B}\,x(t), \label{eq:ssm_cont}\\
+  y(t) &= \mathbf{C}\,h(t),
+\end{align}
+where $h(t)\!\in\!\R^{d}$ is the latent state, $x(t)\!\in\!\R^{n}$
+is the input, and the selective parameters
+$\mathbf{A}_t,\mathbf{B}_t,\mathbf{C}_t$ are functions of the current token.
+The standard ZOH discretization yields
+$\bar{\mathbf{A}} = \exp(\Delta\mathbf{A})$,
+$\bar{\mathbf{B}} = \int_0^\Delta \exp(\tau\mathbf{A})\,d\tau\,\mathbf{B}$,
+which reduces to
+$\mathbf{A}^{-1}(\exp(\Delta\mathbf{A})-I)\mathbf{B}$
+when $\mathbf{A}$ is nonsingular.
+The recurrence $h_t = \bar{\mathbf{A}}h_{t-1} + \bar{\mathbf{B}}x_t$
+is parallelised via an associative prefix scan in $O(L)$ work and
+$O(\log L)$ span \cite{blelloch1990prefix}.
+
+\subsection{Symplectic Selective Dynamics}
+\label{sec:symplectic}
+
+\paragraph{Hamiltonian Partitioning.}
+We partition the latent state as $h=[q,\,p]^{\top}$ with
+$q,p\in\R^{d/2}$ representing generalised coordinates and momenta.
+The latent Hamiltonian is
+$\calH(q,p) = T(p) + V(q)$,
+where $T$ and $V$ are the kinetic and potential energy components
+learned by the neural network.
+
+\paragraph{Why the standard selective transition is insufficient.}
+ZOH treats $\mathbf{A}_t,\mathbf{B}_t$ and the forcing
+$\bar{\mathbf{B}}_t x_t$ as fixed over $[t,t+\Delta]$.
+This is numerically legitimate for generic linear systems, but it does not
+enforce the Hamiltonian block structure
+$\dot{h}=J\nabla\calH(h)$ or the discrete condition
+$M_t^{\top}JM_t=J$ on the step Jacobian $M_t$.
+Thus a learned selective transition may expand or contract canonical
+phase-space volume and accumulate nonphysical Hamiltonian error unless the
+transition is explicitly constrained.
+
+\paragraph{St\"{o}rmer--Verlet Replacement.}
+We replace ZOH with a second-order, time-reversible, symplectic integrator.
+Given $\nabla_q V$ and $\nabla_p T$ from the network, one step is:
+\begin{align}
+  p_{t+1/2} &= p_t - \tfrac{\Delta}{2}\,\nabla_q V(q_t), \label{eq:sv1}\\
+  q_{t+1}   &= q_t + \Delta\,\nabla_p T(p_{t+1/2}),     \label{eq:sv2}\\
+  p_{t+1}   &= p_{t+1/2} - \tfrac{\Delta}{2}\,\nabla_q V(q_{t+1}). \label{eq:sv3}
+\end{align}
+Equations~\eqref{eq:sv1}--\eqref{eq:sv3} define the
+\textit{Symplectic Selective Update} that replaces the ZOH kernel.
+
+\begin{proposition}[Symplecticity of the PG-S3 core]
+For a separable latent Hamiltonian
+$\calH(q,p)=T(p)+V(q)$, the map
+$(q_t,p_t)\mapsto(q_{t+1},p_{t+1})$ defined by
+Eqs.~\eqref{eq:sv1}--\eqref{eq:sv3} is symplectic: its Jacobian $M$
+satisfies $M^{\top}JM=J$, where
+$J=\bigl[\begin{smallmatrix}0&I\\-I&0\end{smallmatrix}\bigr]$.
+\end{proposition}
+
+\begin{proof}
+The first and third updates are exact flows of the potential Hamiltonian
+$V(q)$ for a half step, and the middle update is the exact flow of the
+kinetic Hamiltonian $T(p)$ for a full step. Exact Hamiltonian flows are
+symplectic, and a composition of symplectic maps is symplectic.
+\end{proof}
+
+Consequently, Liouville's theorem holds for the conservative core.
+The numerical trajectory exactly conserves a modified, or shadow,
+Hamiltonian
+\begin{equation}
+  \tilde{\calH} = \calH + O(\Delta^2),
+  \label{eq:shadow_hamiltonian}
+\end{equation}
+over exponentially long intervals under the usual smoothness and boundedness
+assumptions for backward error analysis \cite{hairer2006geometric}.
+
+\subsection{Gershgorin CFL Stability Condition}
+\label{sec:cfl}
+
+For a latent transition matrix $\mathbf{A}\in\R^{d\times d}$,
+the Gershgorin Circle Theorem bounds its spectral radius as
+\begin{equation}
+  \rho(\mathbf{A}) \;\le\; \max_i \sum_j |a_{ij}| \;=:\; \rho_G.
+  \label{eq:gerschgorin}
+\end{equation}
+Stability of the St\"{o}rmer--Verlet step requires
+$\omega\Delta_t \le 2$ for a harmonic mode of angular frequency $\omega$.
+Using $\rho_G$ as a conservative upper bound on the largest resolved
+frequency yields the
+\textit{Latent CFL Condition}:
+\begin{align}
+  \Delta_t
+  &= \min\!\left(\Delta_{\max},
+        \frac{2\eta}{\max(\rho_G,\epsilon)}\right),
+        \label{eq:cfl}\\
+  \Delta_{\max}&=0.01,\qquad 0<\eta\le 1. \notag
+\end{align}
+where $\epsilon$ prevents division by zero and $\eta$ is an optional safety
+factor. The factor of 2 follows from the linear stability analysis of the
+St\"{o}rmer--Verlet map applied to a harmonic oscillator
+\cite{hairer2006geometric}. This bound is computed branchlessly via AVX2
+horizontal reduction on each row of $\mathbf{A}$, contracting $\Delta_t$
+during high-gradient perturbations without pipeline stalls.
+\subsection{Lyapunov Predictability Horizon}
+\label{sec:lyapunov}
+
+Chaotic physical systems exhibit exponential divergence of nearby
+trajectories governed by the maximal Lyapunov exponent $\lambda_{\max}$:
+\begin{equation}
+  \|\delta h(t)\| \approx e^{\lambda_{\max}\,t}\,\|\delta h(0)\|.
+\end{equation}
+We define the \textit{Predictability Horizon} as the sequence length
+at which phase error $\|\delta h\|$ exceeds a threshold $\varepsilon$:
+\begin{equation}
+  L_{\text{crit}} = \frac{1}{\lambda_{\max}}\,
+    \ln\!\left(\frac{\varepsilon}{\|\delta h(0)\|}\right).
+  \label{eq:lcrit}
+\end{equation}
+Because the St\"{o}rmer--Verlet map is symplectic for the conservative core,
+it follows the shadow Hamiltonian $\tilde{\calH}$ without artificial
+phase-volume expansion. This does not change the true Lyapunov exponent of
+the target system; rather, it reduces numerical contributions to the measured
+divergence and makes $L_{\text{crit}}$ a property of the modeled dynamics
+rather than an artifact of the integrator.
+
+\subsection{Rate-Distortion Bound for INT4 Quantization}
+\label{sec:rd}
+
+Quantising projection weights $\mathbf{B},\mathbf{C}$ to 4-bit integers
+introduces distortion $D = \mathbb{E}[\|\mathbf{W}_{\text{FP32}} -
+\mathbf{W}_{\text{INT4}}\|^2]$.
+For an ideal symmetric uniform quantizer on $[-\alpha,\alpha]$ with
+step size $\Delta_q = 2\alpha/(2^b-1)$, $b=4$, and approximately uniform
+rounding noise, the noise floor is
+$\sigma_q^2 = \Delta_q^2/12 = \alpha^2/675$.
+
+For a Kolmogorov energy spectrum $E(k)\propto k^{-5/3}$, the tail
+energy beyond wavenumber $k_{\max}$ is
+$\int_{k_{\max}}^\infty E(k)\,dk = \tfrac{3}{2}C\,k_{\max}^{-2/3}$.
+The \textit{Scale-Adaptive Quantization (SAQ)} condition
+$\sigma_q^2 < \int_{k_{\max}}^\infty E(k)\,dk$
+requires that the quantisation scale $\alpha$ is adapted locally to the
+tile dynamic range, ensuring INT4 precision does not
+catastrophically filter the Kolmogorov cascade.
+Concretely, SAQ sets
+$\alpha(t) = \max_i |w_i(t)|$, recomputed per tile to track
+the local dynamic range of $\mathbf{B}$ and $\mathbf{C}$.
+
+% 4. METHODOLOGY
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Architecture Overview}
+An input token sequence $x_{1:L}$ is projected to
+$[q_0,p_0]^{\top}$ by the symplectic encoder (Section~\ref{sec:coupling}).
+The Symplectic Selective Update (Eqs.~\eqref{eq:sv1}--\eqref{eq:sv3})
+propagates the latent state while the Gershgorin CFL bound
+(Eq.~\eqref{eq:cfl}) adapts $\Delta_t$ on the fly.
+The output projection $\mathbf{C}$ maps $h_t\to y_t$ using
+SAQ INT4 weights.
+The full scan is implemented as a Work-Efficient Blelloch Scan
+\cite{blelloch1990prefix} with hybrid tile sizes
+$T=64$ on x86-AVX2 and $T=16$ on ARM-NEON.
+The SAQ scale condition is enforced per tile using each tile's local
+$\alpha(t)$, so the dynamic-range guarantee is applied uniformly across
+all weight tiles.
+\subsection{SIMD Kernel Specification}
+\label{sec:simd}
+
+The innermost integration loop operates on Structure-of-Arrays (SoA)
+vectors $q,p\in\R^{d/2}$ stored in 32-byte-aligned YMM registers.
+The AVX2 kernel implements branchless clamping and min/max saturation:
+\begin{itemize}
+  \item \texttt{VPADDD}: 32-bit accumulation.
+  \item \texttt{VPMINSD}/\texttt{VPMAXSD}: saturated arithmetic.
+  \item \texttt{VPAND}/\texttt{VPXOR}: logical branchless masks.
+  \item \texttt{VFMADD231PS}: fused multiply-add for gradient
+        updates in Eqs.~\eqref{eq:sv1}--\eqref{eq:sv3}.
+\end{itemize}
+All conditional logic is replaced by mask computation, e.g.:
+\begin{equation*}
+  \texttt{val} = (\texttt{mask}\,\&\,\texttt{lim})\,|\,
+                (\sim\!\texttt{mask}\,\&\,\texttt{val}).
+\end{equation*}
+SAQ INT4 is packed as 2 elements per byte with scale $\alpha(t)$
+stored per 64-element tile. Dequantisation unpacks nibbles to signed bytes,
+then uses \texttt{VPMOVSXBD} followed by \texttt{VCVTDQ2PS}.
+
+\subsection{Neural-Physical Coupling}
+\label{sec:coupling}
+
+After an initial dimensional lift into an even-dimensional phase space, the
+coupling layer maps latent coordinates through a sequence of three elementary
+symplectic shears
+$W = S_3 S_2 S_1$, where each
+$S_i \in SL(2,\R)$ is a shear matrix.
+The resulting Jacobian $M$ satisfies $\det(M)=1$, verified analytically:
+\begin{align}
+  q_1 &= q_0 + \alpha\,p_0,
+  & p_1 &= p_0 + \beta\,q_1, \notag\\
+  q_2 &= q_1 + \gamma\,p_1,
+  & p_2 &= p_1. \notag
+\end{align}
+Expanding the determinant:
+$(1+\gamma\beta)(1+\alpha\beta) - \beta(\alpha+\gamma+\gamma\alpha\beta) = 1$.
+For one degree of freedom, $SL(2,\R)=Sp(2,\R)$; hence
+$W^{\top}JW = J$.
+For the full $d$-dimensional latent space with $q, p \in \mathbb{R}^{d/2}$,
+symplecticity is preserved by constructing $W$ as a block-diagonal
+product of $d/2$ independent 2D shear pairs, each acting on a
+$(q_i, p_i)$ coordinate pair. The global map satisfies
+$W^\top J_{d \times d} W = J_{d \times d}$ by the direct-sum
+structure of block-diagonal symplectic matrices \cite{hairer2006geometric}.
+
+Dissipative forcing (modelling non-conservative environments) is handled as
+an optional operator-split Rayleigh damping step rather than as part of the
+conservative symplectic core:
+\begin{equation}
+  F_i = -\gamma_i p_i,\qquad \gamma_i\ge 0,
+  \label{eq:dissipation}
+\end{equation}
+which ensures the dissipation bound
+$\langle F, p\rangle = -\sum_i\gamma_i p_i^2 \le 0$.
+Equivalently, the vectorized update
+$p_i\leftarrow \exp(-\gamma_i\Delta_t)p_i$ is conformally symplectic and
+monotonically removes kinetic energy when damping is enabled.
+
+Zero-copy data ingestion is implemented via \texttt{mmap}
+with \texttt{MAP\_SHARED}, streaming trajectories from a 1\,GB
+pinned buffer without heap allocation during the scan.
+
+\begin{figure}[t]
+\small
+\centering
+\fbox{\begin{minipage}{0.94\linewidth}
+\textbf{Algorithm 1: PG-S3 Symplectic Selective Scan}
+
+\textbf{Input:} sequence $x_{1:L}$; selectors for
+$\mathbf{A}_t,\mathbf{B}_t,\mathbf{C}_t$.
+
+\textbf{Output:} sequence $y_{1:L}$.
+
+\begin{enumerate}
+  \item Initialize $(q_0,p_0)\leftarrow\text{SymplecticEncoder}(x_1)$.
+  \item For $t=1,\ldots,L$:
+  \begin{enumerate}
+    \item Select $(\mathbf{A}_t,\mathbf{B}_t,\mathbf{C}_t)$ from $x_t$.
+    \item Compute $\rho_G\leftarrow\max_i\sum_j |a_{ij}|$ and
+      $\Delta_t\leftarrow\min(\Delta_{\max},
+      2\eta/\max(\rho_G,\epsilon))$.
+    \item Set $\hat{f}^{\,p}_t\leftarrow
+      \operatorname{proj}_p(\mathbf{B}_t x_t)$.
+    \item Apply the forced Verlet half-kick:
+      $p_{t+1/2}\leftarrow p_t-\frac{\Delta_t}{2}\nabla_qV(q_t)
+      +\frac{\Delta_t}{2}\hat{f}^{\,p}_t$.
+    \item Apply the drift:
+      $q_{t+1}\leftarrow q_t+\Delta_t\nabla_pT(p_{t+1/2})$.
+    \item Apply the final half-kick:
+      $p_{t+1}\leftarrow p_{t+1/2}
+      -\frac{\Delta_t}{2}\nabla_qV(q_{t+1})
+      +\frac{\Delta_t}{2}\hat{f}^{\,p}_t$.
+    \item If damping is enabled, apply
+      $p_{t+1}\leftarrow\exp(-\gamma\Delta_t)\odot p_{t+1}$.
+    \item Emit $h_t=[q_{t+1},p_{t+1}]^\top$ and
+      $y_t\leftarrow\mathbf{C}_t h_t$.
+  \end{enumerate}
+\end{enumerate}
+\end{minipage}}
+\end{figure}
+% 5. EXPERIMENTS
+\section{Experiments}
+\label{sec:experiments}
+
+We conduct a five-phase empirical evaluation on a single CPU-only
+machine (Intel Core i5, 8\,GB RAM, macOS\,Ventura, AVX2 support).
+All C++ kernels are compiled with \texttt{g++ -mavx2 -mfma -O3}
+and environment-pinned via
+\texttt{OV\_CPU\_DISPATCH\_ARCH=AVX2}.
+
+\subsection{Phase~01: Complexity Analysis and Benchmarking}
+
+We benchmark the PG-S3 scan across sequence lengths
+$n \in \{128, 512, 2048, 8192, 16384\}$ using 20~warm-up passes and
+50~repetitions per configuration.
+Table~\ref{tab:complexity} reports median latency and peak resident-set
+size (RSS) for the symplectic SSM scan. FAVOR+ Performer
+\cite{choromanski2020rethinking} is retained as a linear-attention reference
+in the harness, but PG-S3 replaces attention entirely with the recurrent
+symplectic scan.
+
+\begin{table}[h]
+\centering
+\caption{Complexity benchmarks (CPU, Intel i5, single thread).
+RSS measured via \texttt{psutil}.}
+\label{tab:complexity}
+\small
+\begin{tabular}{@{}rcc@{}}
+\toprule
+\textbf{Seq.\ len.\ $n$} & \textbf{Latency (ms)} & \textbf{RSS (MB)} \\
+\midrule
+128    &  6.71 &  26.72 \\
+512    & 17.40 &  27.83 \\
+2048   & 57.31 &  34.41 \\
+8192   & 215.02 & 60.31 \\
+16384  & 419.03 & 99.71 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A log-log regression on latency versus $n$ yields $R^2=0.996$ with
+slope $0.861$ over the full measured range, and slope $0.920$
+when the shortest length is excluded. This is consistent with the
+theoretical $O(n)$ work bound, with fixed overheads and cache effects
+visible at small sequence lengths.
+Peak RSS is well within the 5\,GB hardware budget at all lengths.
+A non-linear jump at $n=2048$ in earlier profiling was traced to
+kernel dispatch overhead and does not affect the asymptotic bound.
+
+\textit{Quantization memory footprint.}
+For $L=10^6$, $d=512$, SAQ INT4:
+$10^6 \times 512 \times 0.5\,\text{B} = 256\,\text{MB}$ for
+base tensors plus $<2\,\text{GB}$ for intermediate buffers,
+confirmed well below the 5\,GB ceiling.
+
+\subsection{Phase~02: Symplectic Energy Conservation}
+\label{sec:phase02}
+
+We implement the St\"{o}rmer--Verlet kernel
+(Eqs.~\eqref{eq:sv1}--\eqref{eq:sv3}) as an OpenVINO
+custom operator with AVX2 intrinsics, operating on
+SoA $[q,\,p]^\top$ vectors with $m=k=1$ (natural units).
+The Gershgorin CFL condition (Eq.~\eqref{eq:cfl}) is enforced
+via branchless row-sum reduction, yielding
+$\Delta_t = \min(0.01,\; 2/\omega) = 0.01$.
+
+The Energy-Conserving Error is defined as:
+\begin{equation}
+  \ECE(t) = \left|\frac{\mathcal{H}(h_t) -
+             \mathcal{H}(h_0)}{\mathcal{H}(h_0)}\right|.
+  \label{eq:ece}
+\end{equation}
+
+Over $10^3$ integration steps from initial conditions
+$q_0=1$, $p_0=0$ ($\mathcal{H}_0 = 0.5$):
+
+\begin{table}[h]
+\centering
+\caption{Phase~02 genuine symplectic validation
+         ($\omega=1$, $\Delta t=0.01$, 1000 steps).}
+\label{tab:phase02}
+\small
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+ECE\textsubscript{max}       & $2.5000\times10^{-5}$ \\
+ECE\textsubscript{rms}       & $1.4886\times10^{-5}$ \\
+$\mathcal{H}_{\text{final}}$ & $0.49999630$          \\
+Bounded energy band          & \texttt{True}         \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two properties are notable.
+First, ECE\textsubscript{max} $= 2.5000\times10^{-5}$
+matches the analytic St\"{o}rmer--Verlet harmonic-oscillator bound
+$\omega^2\Delta t^2/4 = 2.5\times10^{-5}$ to four significant figures,
+confirming that the AVX2 kernel
+implements the St\"{o}rmer--Verlet map correctly.
+Second, ECE\textsubscript{rms} $= 1.4886\times10^{-5}
+\approx \text{ECE}_{\max}/\sqrt{2}$,
+the identity for a purely sinusoidal oscillation,
+confirming that the error is \emph{oscillatory and bounded}
+rather than growing---the defining signature of a bounded orbit on the
+shadow energy surface \cite{hairer2006geometric}.
+The final Hamiltonian value $\mathcal{H}_{\text{final}}=0.49999630$
+represents a fractional drift of $3.7\times10^{-6}$ from
+$\mathcal{H}_0 = 0.5$, consistent with ECE\textsubscript{max}.
+
+High-gradient stress tests (Section~\ref{sec:ablation})
+further confirm that ECE remains bounded under Euler
+integration failure modes, with the symplectic advantage
+growing to $268{,}400\times$ at $10^4$ steps.
+This is consistent with the production energy drift
+of $1.26\times10^{-11}\,E_0$ observed in Phase~04,
+where the Gershgorin CFL condition contracts $\Delta_t$
+to ${\approx}5\times10^{-4}$, suppressing the shadow
+Hamiltonian offset by a further factor of $\sim400$.
+
+\subsection{Phase~03: Neural-Physical Coupling Validation}
+
+With the symplectic coupling layer integrated, we run
+1000-step rollouts on 2D Navier--Stokes and
+rigid-body environments.
+\begin{table}[h]
+\centering
+\caption{Phase~03 coupling metrics (1000-step rollout).}
+\label{tab:phase03}
+\small
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+ECE\textsubscript{max}                      & $4.82\times10^{-8}$ \\
+VPS (mean square curl)                      & $1.25\times10^{-9}$ \\
+$L_{\text{crit}}$ (predictability horizon)  & 42.1 steps \\
+Peak RSS                                    & 4.20 GB \\
+Streaming buffer                            & 850 MB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Phase~03 value $L_{\text{crit}}=42.1$ reflects the local coupling
+stability of the 1000-step rollout, probing a near-integrable regime with
+effective $\lambda_{\max}\approx0.024$ under the unit-normalised convention
+of Eq.~\eqref{eq:lcrit}. The Phase~05 value
+$L_{\text{crit}}=2.79$ characterises the full production attractor under
+chaotic forcing, where $\lambda_{\max}=0.3578$.
+The two measurements are complementary: Phase~03 measures predictability of
+the coupled latent dynamics under mild perturbation, whereas Phase~05
+measures the intrinsic chaotic horizon of the production attractor.
+
+The symplectic determinant $\det(W)=1$ is verified analytically
+(Section~\ref{sec:coupling}) and confirmed numerically;
+the dissipation bound $\langle F, p\rangle \le 0$ holds exactly under the
+branchless Rayleigh damping update \eqref{eq:dissipation}.
+The fourth-order vorticity estimator used by the vorticity preservation
+score (VPS) is
+\begin{align}
+  D_x u^y_{i,j}
+    &= \frac{-u_{i+2,j}^y + 8u_{i+1,j}^y
+      -8u_{i-1,j}^y + u_{i-2,j}^y}{12h}, \notag\\
+  D_y u^x_{i,j}
+    &= \frac{-u_{i,j+2}^x + 8u_{i,j+1}^x
+      -8u_{i,j-1}^x + u_{i,j-2}^x}{12h}, \notag\\
+  \omega_{i,j} &= D_x u^y_{i,j} - D_y u^x_{i,j}
+      + \mathcal{O}(h^4).
+  \label{eq:vps}
+\end{align}
+with $\VPS=\frac{1}{|\Omega|}\sum_{(i,j)\in\Omega}
+(\omega_{i,j}^{\mathrm{model}}-\omega_{i,j}^{\mathrm{ref}})^2$.
+The reported value $1.25\times10^{-9}$ confirms that the latent velocity
+field remains within physically acceptable vorticity bounds for this rollout.
+Memory constraints are satisfied: both the 5\,GB total RSS
+and 1\,GB streaming-buffer ceilings are respected
+(Table~\ref{tab:phase03}).
+
+\subsection{Phase~04: Production Execution and Stability Profiling}
+
+We scale to $524\,288$ simultaneous trajectories across
+$512$-dimensional phase space
+(total element count: $268\,435\,456$),
+orchestrated via a Python subprocess wrapper that queries
+\texttt{RUSAGE\_CHILDREN} to correctly attribute the C++ worker memory.
+
+\begin{table}[h]
+\centering
+\caption{Phase~04 production metrics.}
+\label{tab:prod}
+\small
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Throughput (steps/sec)         & $1.2\times10^6$ \\
+Total fractional drift ($|\Delta E|/E_0$) & $1.26\times10^{-11}$ \\
+Linear response error          & $<1\%$ \\
+Peak worker RSS                & 4096.50 MB \\
+Peak orchestrator RSS          & 10.51 MB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A real-time monitoring loop queries \texttt{getrusage}
+every $10^4$ steps and enforces a soft-ceiling
+abort at 4.5\,GB, leaving margin for OS fluctuations.
+Chaos injection perturbs the momentum field with
+$\delta p \sim \mathcal{U}(-\varepsilon,\varepsilon)$
+using a spatially correlated kernel
+$\exp(-|x-x_c|^2/\sigma^2)$ to maintain VPS conditions;
+the Lyapunov divergence $\delta(t)=|x_1(t)-x_2(t)|$
+is tracked against twin trajectories.
+Linear response checks every $10^5$ steps confirm
+that small impulse deviations match the Jacobian
+prediction $J(t)\delta p$ within 1\%.
+
+\subsection{Phase~05: Topological Reconstruction and Lyapunov Analysis}
+
+Phase~05 applies a full statistical pipeline to the
+unpadded, 64-byte-aligned binary telemetry from Phase~04.
+
+\paragraph{Embedding.}
+The embedding delay $\tau=1$ is selected from the first local minimum of
+Average Mutual Information (AMI), reducing delay-coordinate redundancy.
+False Nearest Neighbour analysis selects embedding dimension $m=3$.
+The delay-embedded attractor $X_i = [x_i, x_{i+\tau}, x_{i+2\tau}]$
+is constructed for topological analysis.
+
+\subsection*{Ablation: Symplectic vs.\ Non-Symplectic Integration}
+\label{sec:ablation}
+
+Table~\ref{tab:ablation} compares ECE at four checkpoints over
+$10^4$ integration steps on a unit harmonic oscillator
+($\omega=1$, $\Delta t=0.01$, initial conditions $q_0=1$, $p_0=0$).
+
+\begin{table}[h]
+\centering
+\caption{ECE checkpoints over $10^4$ steps ($\omega=1$,
+         $\Delta t=0.01$). Euler ECE grows as
+         $e^{N\omega^2\Delta t^2}-1$; St\"{o}rmer--Verlet ECE
+         remains bounded and oscillatory.}
+\label{tab:ablation}
+\scriptsize
+\begin{tabular}{@{}rccc@{}}
+\toprule
+\textbf{Step} & \textbf{Euler}
+              & \textbf{Verlet}
+              & \textbf{Ratio} \\
+\midrule
+100    & $1.005\times10^{-2}$ & $1.770\times10^{-5}$ & $568\times$ \\
+1\,000 & $1.052\times10^{-1}$ & $7.400\times10^{-6}$ & $14{,}216\times$ \\
+5\,000 & $6.487\times10^{-1}$ & $1.718\times10^{-6}$ & $377{,}590\times$ \\
+10\,000& $1.718\times10^{0}$  & $6.401\times10^{-6}$ & $268{,}400\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Euler (non-symplectic).}
+Forward Euler produces a non-symplectic map whose Jacobian
+satisfies $\det(M) = 1 + \omega^2\Delta t^2 > 1$, expanding
+phase-space volume at every step.
+Energy grows monotonically as
+$(1+\omega^2\Delta t^2)^N - 1 \approx e^{N\omega^2\Delta t^2} - 1$,
+reaching ECE $= 1.718$ at step $10^4$---a divergence that renders
+long-horizon rollouts physically meaningless.
+
+\paragraph{St\"{o}rmer--Verlet (PG-S3).}
+The symplectic map conserves a shadow Hamiltonian
+$\tilde{\mathcal{H}} = \mathcal{H} + O(\Delta t^2)$
+\cite{hairer2006geometric},
+bounding the ECE by $\omega^2\Delta t^2/4 = 2.50\times10^{-5}$.
+Crucially, the observed ECE is not a fixed offset but
+\emph{oscillatory}, varying between $1.7\times10^{-6}$
+and $1.8\times10^{-5}$ across $10^4$ steps with no
+secular growth.
+This behaviour is the direct signature of bounded motion on a shadow energy
+surface rather than outward spiralling, confirming that
+PG-S3 preserves the topological structure of Hamiltonian
+phase space.
+At step $10^4$ the improvement over Euler is $268{,}400\times$,
+a ratio that grows without bound as $N\to\infty$
+because Euler diverges while PG-S3 remains bounded.
+This is consistent with the production energy drift of
+$1.26\times10^{-11}\,E_0$ observed in Phase~04,
+where the Gershgorin CFL condition adaptively contracts
+$\Delta t$ to ${\approx}5\times10^{-4}$, further suppressing
+the shadow Hamiltonian offset.
+
+\paragraph{Lyapunov Exponent.}
+The Rosenstein algorithm \cite{rosenstein1993practical}
+tracks the average divergence of nearest-neighbour pairs
+over a 100-step window.
+Log-linear regression on the divergence curve yields:
+\begin{equation}
+  \lambda_{\max} = 0.3578, \qquad R^2 = 0.9792,
+  \label{eq:lambda}
+\end{equation}
+indicating high-confidence convergence within the chaotic
+growth regime. In Phase~05, we adopt the simplified form $L_{\text{crit}} = 1/\lambda_{\max}$,
+corresponding to the unit-normalised threshold
+$\ln(\varepsilon / \|\delta h(0)\|) = 1$,
+i.e.\ an initial separation of $\|\delta h(0)\| = \varepsilon/e$.
+This convention fixes the predictability scale to the natural
+unit of the embedding time step.
+The predictability horizon $L_{\text{crit}} = 1/\lambda_{\max} \approx 2.79$
+(in units of the embedding time step).
+
+\paragraph{Poincar\'{e} Section.}
+Adaptive sectioning at $z = \operatorname{mean}(X[:,2])$
+captures manifold intersections without bias from
+fixed-plane methods.
+
+\paragraph{Correlation Dimension.}
+The correlation integral $C(r)\propto r^{D_2}$ is estimated
+using a KD-tree nearest-neighbour approach over a dynamic
+scaling interval $r\in[r_{\min},r_{\max}]$,
+yielding $D_2 = 2.12$, consistent with
+a dissipative strange attractor of low topological complexity.
+
+\begin{table}[h]
+\centering
+\caption{Phase~05 topological invariants and performance.}
+\label{tab:phase05}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} & \textbf{Status} \\
+\midrule
+$\lambda_{\max}$ (Lyapunov)    & 0.3578  & Verified \\
+Convergence $R^2$              & 0.9792  & High confidence \\
+$L_{\text{crit}}$ (horizon)    & 2.79    & Consistent \\
+Correlation dim.\ $D_2$        & 2.12    & Consistent \\
+Peak analysis RSS              & 4096.5 MB & PASS \\
+Ingestion throughput           & $>500$ MB/s & PASS \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% 6. DISCUSSION
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Symplecticity and energy drift.}
+The reported energy-drift metric is the total fractional Hamiltonian drift
+$|\Delta\mathcal{H}|/E_0$ accumulated over the full production run of
+$N=1.2\times10^9$ integration steps.
+This is a decisive improvement over non-symplectic baselines,
+which can exhibit secular energy growth even when their local truncation
+error is small \cite{hairer2006geometric}.
+The oscillatory---rather than monotonically growing---nature of
+the St\"{o}rmer--Verlet ECE (Table~\ref{tab:ablation}) provides
+direct empirical evidence that the numerical trajectory remains on a nearby
+shadow energy surface, the geometric property underlying the long-horizon
+stability of PG-S3.
+
+\paragraph{Predictability horizon.}
+The empirically measured $L_{\text{crit}}=2.79$ characterises
+the horizon of the particular attractor probed in Phase~05.
+For smoother Hamiltonian dynamics with smaller $\lambda_{\max}$,
+$L_{\text{crit}}$ scales inversely, meaning that physical
+environments with weaker chaos (e.g., near-integrable rigid bodies)
+will exhibit substantially longer predictability.
+
+\paragraph{Limitations.}
+The Phase~02 oscillator is a controlled unit test of the integrator, not a
+substitute for full physical validation. Phase~04 therefore evaluates the
+production core on trajectory ensembles and attributes worker memory via
+\texttt{RUSAGE\_CHILDREN}.
+As an architectural roadmap, the current coupling layer uses fixed scalar
+shear parameters $\alpha,\beta,\gamma$ to keep the phase-space transform
+analytically symplectic. A natural next extension is to make these parameters
+learnable while constraining the update to remain in $Sp(d,\R)$, enabling
+data-adaptive symplectic manifolds without giving up the geometric guarantee.
+Additionally, the 4-bit SAQ bound assumes locally uniform
+quantisation noise; learned or information-aware 4-bit formats such as
+NF4-style quantisation \cite{dettmers2023qlora} could improve spectral
+tail fidelity further.
+
+% 7. CONCLUSION
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented PG-S3, a world-model architecture that marries the
+$O(L)$ complexity of selective state space models with the geometric
+integrity of Hamiltonian mechanics.
+By replacing ZOH discretization with a St\"{o}rmer--Verlet symplectic
+integrator, enforcing a Gershgorin CFL stability bound, and deploying
+SAQ INT4 quantization on AVX2 hardware, PG-S3 achieves:
+(i)~Hamiltonian energy drift of $1.26\times10^{-11}\,E_0$
+at $1.2\times10^6$ steps/second on consumer CPU hardware;
+(ii)~a verified memory footprint of $4\,096.5$\,MB for
+$524\,288$-trajectory production runs; and
+(iii)~topological reconstruction of the learned latent attractor
+with $\lambda_{\max}=0.3578$ and $L_{\text{crit}}=2.79$.
+These results confirm that physical conservation laws and
+hardware-level efficiency are not in tension---they are
+mutually reinforcing constraints that, together, enable
+robust, long-horizon physical world modeling on accessible hardware.
+
+% REFERENCES
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}

@@ -1,0 +1,32 @@
+[
+  {
+    "n": 128,
+    "mechanism": "Performer",
+    "median_latency": 0.006705988500470994,
+    "peak_rss_mb": 26.72265625
+  },
+  {
+    "n": 512,
+    "mechanism": "Performer",
+    "median_latency": 0.017395494498487096,
+    "peak_rss_mb": 27.828125
+  },
+  {
+    "n": 2048,
+    "mechanism": "Performer",
+    "median_latency": 0.05730776050040731,
+    "peak_rss_mb": 34.40625
+  },
+  {
+    "n": 8192,
+    "mechanism": "Performer",
+    "median_latency": 0.21602453699961188,
+    "peak_rss_mb": 60.30859375
+  },
+  {
+    "n": 16384,
+    "mechanism": "Performer",
+    "median_latency": 0.4190347610019671,
+    "peak_rss_mb": 99.70703125
+  }
+]
